@@ -1,0 +1,2 @@
+remoteHost	ansible_host=192.168.124.200	ansible_connection=ssh	ansible_user=root
+remoteHostUser	ansible_host=192.168.124.200	ansible_connection=ssh	ansible_user=ospng

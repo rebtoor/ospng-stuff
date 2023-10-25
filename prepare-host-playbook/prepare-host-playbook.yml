@@ -1,0 +1,132 @@
+---
+
+- name: Install collections on localhost
+  hosts: localhost
+  gather_facts: false
+  tasks:
+
+    - name: Install required collections
+      ansible.builtin.command:
+        cmd: ansible-galaxy collection install community.general -f
+        creates: ~/.ansible/collections/ansible_collections/community/general/
+      register: ansible_galaxy_collection_install
+      changed_when: ansible_galaxy_collection_install.rc == 0
+      failed_when: ansible_galaxy_collection_install.rc != 0
+
+- name: Prepare host (root)
+  hosts: remoteHost
+  gather_facts: true
+  become: true
+  tasks:
+
+    - name: Set root partition name
+      ansible.builtin.set_fact:
+        root_partition: "{{ (ansible_mounts | selectattr('mount', 'equalto', '/'))[0]['device'] }}"
+
+    - name: Set LVM info
+      ansible.builtin.set_fact:
+        lvname: "{{ (root_partition | basename | split('-'))[-1] }}"
+        vgname: "{{ (root_partition | basename | regex_replace('--', '-') | split('-'))[:-1] | join('-') }}"
+
+    - name: Extend LV and FS
+      community.general.lvol:
+        vg: "{{ vgname }}"
+        lv: "{{ lvname }}"
+        size: +100%FREE
+        resizefs: true
+
+    - name: Upgrade all packages
+      ansible.builtin.dnf:
+        name: "*"
+        state: latest
+
+    - name: Install required packages
+      ansible.builtin.dnf:
+        name:
+          - ansible
+          - git
+          - guestfs-tools
+          - dbus-x11
+          - libvirt
+          - make
+          - podman
+          - qemu-kvm
+          - tmux
+        state: present
+
+    - name: Enable and start libvirtd
+      ansible.builtin.systemd_service:
+        name: libvirtd
+        state: started
+        enabled: true
+
+    - name: Add ospng group
+      ansible.builtin.group:
+        name: ospng
+        state: present
+
+    - name: Create ospng user
+      ansible.builtin.user:
+        name: ospng
+        group: ospng
+        state: present
+
+    - name: Add ospng to sudoers
+      community.general.sudoers:
+        name: allow-ospng-admin
+        state: present
+        user: ospng
+        runas: root
+        nopassword: true
+        commands: ALL
+
+    - name: Avoid to kill processes after ssh logout for user ospng
+      ansible.builtin.command: loginctl enable-linger ospng
+
+    - name: Check if authorized_keys from root exists
+      ansible.builtin.stat:
+        path: "{{ ansible_env['HOME'] + '/.ssh/authorized_keys' }}"
+      register: remote_user_auth_keys
+
+    - name: Copy authorized_keys from root if exists
+      when: remote_user_auth_keys.stat.exists
+      block:
+        - name: Create .ssh dir for ospng user
+          ansible.builtin.file:
+            path: "{{ ansible_env['HOME'] + '/.ssh' }}"
+            owner: ospng
+            group: ospng
+            mode: '0700'
+            state: directory
+
+        - name: Retrieve root authorized_keys
+          ansible.builtin.slurp:
+            src: "{{ ansible_env['HOME'] + '/.ssh/authorized_keys' }}"
+          register: remote_user_auth_keys_file
+
+        - name: Copy authorized_keys from root if exists
+          ansible.posix.authorized_key:
+            user: ospng
+            state: present
+            key: "{{ remote_user_auth_keys_file['content'] | b64decode }}"
+
+- name: Prepare host (user)
+  hosts: remoteHostUser
+  gather_facts: true
+  tasks:
+
+    - name: Clone install_yamls
+      ansible.builtin.git:
+        repo: "https://github.com/openstack-k8s-operators/install_yamls.git"
+        dest: "{{ ansible_env['HOME'] + '/install_yamls' }}"
+        version: "main"
+
+    - name: Install required tools
+      ansible.builtin.make:
+        chdir: "{{ ansible_env['HOME'] + '/install_yamls/devsetup' }}"
+        target: download_tools
+
+    - name: Touch pull-secret.txt
+      ansible.builtin.file:
+        path: "{{ ansible_env['HOME'] + '/install_yamls/devsetup/pull-secret.txt' }}"
+        state: touch
